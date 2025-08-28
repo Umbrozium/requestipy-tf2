@@ -1,8 +1,8 @@
-watchdog
-sounddevice
-soundfile
-yt-dlp
-pytest
-gTTS
-pydub
-jsonschema
+watchdog>=3.0.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+yt-dlp>=2023.10.13
+pytest>=7.4.0
+gTTS>=2.4.0
+pydub>=0.25.1
+jsonschema>=4.19.0

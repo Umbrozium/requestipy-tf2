@@ -133,16 +133,14 @@ def _download_audio(url_or_search: str) -> str | None:
 
 
 def cmd_play(user: Dict[str, Any], args: List[str]):
-    """handles the !play command."""
+    """handles the !play command with improved error handling."""
     global _audio_player_instance
     if not _audio_player_instance:
         logger.error("audioplayer instance not available for !play command.")
-        # todo: notify user?
         return
 
     if not args:
         logger.warning(f"user {user['name']} used !play without arguments.")
-        # todo: send help message to user?
         return
 
     query = " ".join(args)
@@ -150,22 +148,24 @@ def cmd_play(user: Dict[str, Any], args: List[str]):
 
     # run download in a separate thread to avoid blocking the command executor
     def download_and_play():
-        file_path = _download_audio(query)
-        if file_path:
-            # --- Add another small delay before queueing ---
-            time.sleep(0.2)
-            # ---------------------------------------------
-            if os.path.exists(file_path):
-                logger.info(f"Queueing downloaded file: {file_path}")
-                _audio_player_instance.play_file(file_path)
-                # todo: optionally add cleanup for downloaded files later
+        try:
+            file_path = _download_audio(query)
+            if file_path:
+                # Add small delay before queueing
+                time.sleep(0.2)
+                if os.path.exists(file_path):
+                    logger.info(f"Queueing downloaded file: {file_path}")
+                    # Extract title from query for better user experience
+                    title = query[:50] + "..." if len(query) > 50 else query
+                    _audio_player_instance.play_file(file_path, title=title)
+                else:
+                    logger.error(f"downloaded file path reported but not found: {file_path}")
             else:
-                 logger.error(f"downloaded file path reported but not found: {file_path}")
-        else:
-            logger.error(f"failed to get audio file for query: {query}")
-            # todo: notify user of failure?
+                logger.error(f"failed to get audio file for query: {query}")
+        except Exception as e:
+            logger.error(f"unexpected error in download_and_play for '{query}': {e}", exc_info=True)
 
-    download_thread = threading.Thread(target=download_and_play, daemon=True)
+    download_thread = threading.Thread(target=download_and_play, daemon=True, name=f"Download-{query[:20]}")
     download_thread.start()
 
 # --- !stop command logic ---

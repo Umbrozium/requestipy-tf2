@@ -131,6 +131,8 @@ def main():
             audio_player.shutdown()
         if 'plugin_manager' in locals() and plugin_manager:
             plugin_manager.unload_plugins() # unload the plugins
+        if 'event_bus' in locals() and event_bus:
+            event_bus.shutdown(wait=True)  # shutdown the event bus
         # core_commands.unregister(command_manager) # optional: unregister basic commands if we need to
         # executor.shutdown() # executor doesn't need a special shutdown right now
 

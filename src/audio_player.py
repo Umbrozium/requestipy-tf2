@@ -4,8 +4,10 @@ import threading
 import time
 import sounddevice as sd
 import soundfile as sf
-from typing import Optional, Dict, Any, List # add list here
-from typing import Optional
+from typing import Optional, Dict, Any, List
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
 
 # assuming eventbus is around if we need it for events like playback_started/finished
 # from src.event_bus import EventBus
@@ -17,7 +19,17 @@ EVENT_PLAYBACK_STARTED = "playback_started"
 EVENT_PLAYBACK_FINISHED = "playback_finished"
 EVENT_PLAYBACK_ERROR = "playback_error"
 
-from typing import Optional, Dict, Any
+class PlaybackState(Enum):
+    STOPPED = "stopped"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    STOPPING = "stopping"
+
+@dataclass
+class AudioItem:
+    file_path: str
+    title: Optional[str] = None
+    duration: Optional[float] = None
 
 class AudioPlayer:
     """handles audio playback using sounddevice and soundfile."""
@@ -27,10 +39,13 @@ class AudioPlayer:
         self._event_bus = event_bus
         self._playback_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._play_queue = queue.Queue() # queue to hold file paths to play
+        self._play_queue = queue.Queue() # queue to hold AudioItem objects
         self._current_stream: Optional[sd.OutputStream] = None
-        self._lock = threading.Lock() # lock to protect shared stuff like _current_stream
+        self._lock = threading.RLock() # reentrant lock for nested locking
         self._target_device_id: Optional[int] = None # store the target device id
+        self._state = PlaybackState.STOPPED
+        self._current_item: Optional[AudioItem] = None
+        self._shutdown_requested = False
 
         # find the target device before starting the thread
         self._target_device_id = self._find_output_device_id()
@@ -265,14 +280,19 @@ class AudioPlayer:
         logger.warning("audio playback thread loop exited.") # changed level to warning
 
 
-    def play_file(self, file_path: str):
-        """adds a file path to the playback queue."""
+    def play_file(self, file_path: str, title: Optional[str] = None):
+        """adds a file to the playback queue."""
+        if self._shutdown_requested:
+            logger.warning("Cannot queue file, AudioPlayer is shutting down")
+            return
+            
         if not isinstance(file_path, str) or not file_path:
              logger.error("invalid file path provided for playback.")
              return
-        # basic check, ideally validate existence/permissions here or in playback loop
+             
+        audio_item = AudioItem(file_path=file_path, title=title)
         logger.info(f"queueing file for playback: {file_path}")
-        self._play_queue.put(file_path)
+        self._play_queue.put(audio_item)
 
     def stop_playback(self, clear_queue: bool = False): # default clear_queue to false
         """signals the playback thread to stop the current track. optionally clears the queue."""
@@ -302,10 +322,20 @@ class AudioPlayer:
         # self._stop_event.clear() # ensure this line is removed or commented out
         # logger.debug("stop event cleared, playback loop can continue.") # ensure this is removed or commented out
 
-    def get_queue_snapshot(self) -> List[str]:
+    def get_queue_snapshot(self) -> List[AudioItem]:
         """returns a copy of the current items in the playback queue."""
         with self._play_queue.mutex: # access underlying queue safely
             return list(self._play_queue.queue)
+            
+    def get_current_state(self) -> PlaybackState:
+        """returns the current playback state."""
+        with self._lock:
+            return self._state
+            
+    def get_current_item(self) -> Optional[AudioItem]:
+        """returns the currently playing item."""
+        with self._lock:
+            return self._current_item
 
     def get_output_device_id(self) -> Optional[int]:
         """returns the configured output device id (or none if default)."""
@@ -315,13 +345,16 @@ class AudioPlayer:
     def shutdown(self):
         """stops the playback thread and cleans up."""
         logger.info("audioplayer shutting down...")
+        with self._lock:
+            self._shutdown_requested = True
+            
         self.stop_playback(clear_queue=True) # stop current sound and clear queue
         self._stop_event.set() # signal the playback loop thread to exit
         self._play_queue.put(None) # add sentinel value to unblock queue.get()
 
         if self._playback_thread and self._playback_thread.is_alive():
             logger.debug("waiting for playback thread to finish...")
-            self._playback_thread.join(timeout=2) # wait for the thread
+            self._playback_thread.join(timeout=5) # increased timeout
             if self._playback_thread.is_alive():
                  logger.warning("playback thread did not shut down gracefully.")
         logger.info("audioplayer shut down complete.")

@@ -1,30 +1,56 @@
 import logging
 import os
 import re
-import time # Make sure time is imported
+import time
 import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from typing import Dict, Callable, List
-from collections import deque # import deque for cache
-import hashlib # for hashing lines
+from typing import Dict, Callable, List, Optional, Pattern
+from collections import deque
+from dataclasses import dataclass
+from enum import Enum
 
 # assuming eventbus is in the same directory or accessible via sys.path
 from src.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
 
-# regex patterns
-# Updated chat regex to capture SteamID (Full Format)
-# Example: *DEAD* Player Name<U:1:12345><Blue> : !command args
-CHAT_REGEX_FULL = re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$") # Made team tag optional
-CHAT_REGEX_SIMPLE = re.compile(r"^(?P<user>[^:]+?) : (?P<message>.+)$") # Simple format: User : Message
-# user killed otheruser with weapon. (crit)
-KILL_REGEX = re.compile(r"^(?P<killer>.+?) killed (?P<victim>.+?) with (?P<weapon>.+?)\.(?: \(crit\))?$")
-# user connected
-CONNECT_REGEX = re.compile(r"^(?P<user>.+?) connected$") # simple version
-# user suicided.
-SUICIDE_REGEX = re.compile(r"^(?P<user>.+?) suicided\.$")
+class MessageType(Enum):
+    CHAT_FULL = "chat_full"
+    CHAT_SIMPLE = "chat_simple"
+    KILL = "kill"
+    CONNECT = "connect"
+    SUICIDE = "suicide"
+    UNDEFINED = "undefined"
+
+@dataclass
+class CompiledPattern:
+    pattern: Pattern[str]
+    message_type: MessageType
+    
+# Pre-compiled regex patterns for better performance
+COMPILED_PATTERNS = [
+    CompiledPattern(
+        re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$"),
+        MessageType.CHAT_FULL
+    ),
+    CompiledPattern(
+        re.compile(r"^(?P<user>[^:]+?) : (?P<message>.+)$"),
+        MessageType.CHAT_SIMPLE
+    ),
+    CompiledPattern(
+        re.compile(r"^(?P<killer>.+?) killed (?P<victim>.+?) with (?P<weapon>.+?)\.(?: \(crit\))?$"),
+        MessageType.KILL
+    ),
+    CompiledPattern(
+        re.compile(r"^(?P<user>.+?) connected$"),
+        MessageType.CONNECT
+    ),
+    CompiledPattern(
+        re.compile(r"^(?P<user>.+?) suicided\.$"),
+        MessageType.SUICIDE
+    )
+]
 
 # define event names (constants)
 EVENT_CHAT_RECEIVED = "chat_received"
@@ -160,118 +186,122 @@ class LogReader:
         return os.path.join(game_dir, log_file)
 
     def _process_line(self, line: str):
-        """parses a single line from the log and publishes events."""
-        # --- duplicate check removed ---
-        # ... (duplicate check code commented out as before) ...
-        # --- end duplicate check ---
-
-        # proceed with processing every line read
+        """parses a single line from the log and publishes events with optimized pattern matching."""
+        line = line.strip()
+        if not line:
+            return
+            
         logger.debug(f"processing line: {line}")
 
-        # --- Try matching different chat formats ---
-        user_info = None
-        message = None
-
-        # Variables to store extracted data
-        raw_user_name = None
-        steamid = None
-        team = None
-        # 1a. Try matching the full format (with SteamID)
-        match_full = CHAT_REGEX_FULL.match(line)
-        if match_full:
-            user = (match_full.group('user') or "").strip()
-            message = (match_full.group('message') or "").strip()
-            steamid = match_full.group('steamid')
-            team = match_full.group('team') # Might be None if optional part didn't match
-            raw_user_name = user # Store potentially tagged name
-
-        # 1b. If full format didn't match, try simple format
-        else: # No need for elif not user_info, just try simple if full failed
-            match_simple = CHAT_REGEX_SIMPLE.match(line)
-            if match_simple:
-                user = (match_simple.group('user') or "").strip()
-                message = (match_simple.group('message') or "").strip()
-                raw_user_name = user # Store potentially tagged name
-                steamid = None # No steamid in simple format
-                team = None    # No team in simple format
-
-        # --- If any chat format matched, clean username and create user_info ---
-        if raw_user_name is not None and message is not None:
-            # Apply tag stripping to raw_user_name
-            user_name = raw_user_name # Start with raw name for stripping
-            stripped_tags = [] # Store potentially multiple tags
-            possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "*SPEC*", "[SPEC]", "[DEAD]"]
-            logger.debug(f"Starting tag stripping for raw name: '{user_name}'") # Debug log before loop
-
-            # --- Loop to strip multiple tags ---
-            while True:
-                tag_found_in_pass = False
-                current_name_before_pass = user_name # Store name before inner loop
-                for tag in possible_tags:
-                    # Check for tag with space
-                    if user_name.startswith(tag + " "):
-                        stripped_tags.append(tag)
-                        user_name = user_name[len(tag)+1:].strip()
-                        logger.debug(f"Stripped tag '{tag} ', remaining: '{user_name}'") # Debug log inside loop
-                        tag_found_in_pass = True
-                        break # Restart tag check from beginning with stripped name
-                    # Check for tag without space (less common but possible)
-                    elif user_name.startswith(tag):
-                         stripped_tags.append(tag)
-                         user_name = user_name[len(tag):].strip()
-                         logger.debug(f"Stripped tag '{tag}', remaining: '{user_name}'") # Debug log inside loop
-                         tag_found_in_pass = True
-                         break # Restart tag check from beginning with stripped name
-
-                # If no tag was found in this pass, exit the while loop
-                if not tag_found_in_pass:
-                    break
-                # Safety break: If stripping didn't change the name, exit to prevent infinite loop
-                if user_name == current_name_before_pass:
-                    logger.warning(f"Tag stripping loop encountered potential infinite loop for '{raw_user_name}'. Breaking.")
-                    break
-            # --- End loop ---
-            logger.debug(f"Finished tag stripping. Final name: '{user_name}', Tags: {stripped_tags}") # Debug log after loop
-
-            if not user_name: # Safety check after stripping
-                logger.warning(f"Could not extract final user name after stripping tags from: {raw_user_name}")
-                return # Cannot proceed without a username
-
-            # Create the final user_info dict
-            # Join tags if needed, or just use the list, or the last one found
-            final_tags = " ".join(stripped_tags) if stripped_tags else None
-            user_info = {"name": user_name, "steamid": steamid, "tags": final_tags, "team": team}
-
-        # --- Process if a chat format matched ---
-        if user_info and message is not None:
-            if message.startswith("!") and len(message) > 1:
-                # Command detected
-                parts = message.split(maxsplit=1)
-                command = parts[0]
-                args_str = parts[1].strip() if len(parts) > 1 else "" # strip args string too
-                args_list = args_str.split() # simple space splitting for now
-                logger.info(f"Command detected: user={user_info['name']}, command={command}, args={args_list}")
-                logger.debug(f"publishing event_command_detected with user_info: {user_info}")
-                self._event_bus.publish(EVENT_COMMAND_DETECTED, user=user_info, command=command, args=args_list)
-            else:
-                # Regular chat message
-                 logger.info(f"Chat received: user={user_info['name']}, message='{message}'")
-                 self._event_bus.publish(EVENT_CHAT_RECEIVED, user=user_info, message=message)
-            return # line processed
-
-        # --- If no chat format matched, check other patterns ---
-        kill_match = KILL_REGEX.match(line)
-        if kill_match:
-            kill_data = kill_match.groupdict()
-            logger.info(f"kill detected: {kill_data['killer']} killed {kill_data['victim']} with {kill_data['weapon']}")
-            self._event_bus.publish(EVENT_PLAYER_KILL, killer=kill_data['killer'], victim=kill_data['victim'], weapon=kill_data['weapon'])
-            return
-
-        # add checks for connect_regex, suicide_regex etc. here...
-
-        # if no specific pattern matched
+        # Try each compiled pattern in order of likelihood
+        for compiled_pattern in COMPILED_PATTERNS:
+            match = compiled_pattern.pattern.match(line)
+            if match:
+                self._handle_pattern_match(match, compiled_pattern.message_type, line)
+                return
+                
+        # No pattern matched - publish undefined message
         logger.debug(f"undefined message: {line}")
         self._event_bus.publish(EVENT_UNDEFINED_MESSAGE, message=line)
+        
+    def _handle_pattern_match(self, match: re.Match, message_type: MessageType, line: str):
+        """handle a successful pattern match based on message type."""
+        if message_type in (MessageType.CHAT_FULL, MessageType.CHAT_SIMPLE):
+            self._handle_chat_match(match, message_type)
+        elif message_type == MessageType.KILL:
+            self._handle_kill_match(match)
+        elif message_type == MessageType.CONNECT:
+            self._handle_connect_match(match)
+        elif message_type == MessageType.SUICIDE:
+            self._handle_suicide_match(match)
+            
+    def _handle_chat_match(self, match: re.Match, message_type: MessageType):
+        """handle chat message matches with optimized user processing."""
+        raw_user_name = (match.group('user') or "").strip()
+        message = (match.group('message') or "").strip()
+        
+        if not raw_user_name or not message:
+            return
+            
+        # Extract additional data based on message type
+        steamid = match.group('steamid') if message_type == MessageType.CHAT_FULL else None
+        team = match.group('team') if message_type == MessageType.CHAT_FULL else None
+
+        # Process username and tags
+        user_name, stripped_tags = self._process_username_tags(raw_user_name)
+        if not user_name:
+            logger.warning(f"Could not extract final user name after stripping tags from: {raw_user_name}")
+            return
+            
+        # Create user info
+        final_tags = " ".join(stripped_tags) if stripped_tags else None
+        user_info = {"name": user_name, "steamid": steamid, "tags": final_tags, "team": team}
+
+        # Process chat message
+        if message.startswith("!") and len(message) > 1:
+            # Command detected
+            parts = message.split(maxsplit=1)
+            command = parts[0]
+            args_str = parts[1].strip() if len(parts) > 1 else ""
+            args_list = args_str.split()
+            logger.info(f"Command detected: user={user_info['name']}, command={command}, args={args_list}")
+            self._event_bus.publish(EVENT_COMMAND_DETECTED, user=user_info, command=command, args=args_list)
+        else:
+            # Regular chat message
+            logger.info(f"Chat received: user={user_info['name']}, message='{message}'")
+            self._event_bus.publish(EVENT_CHAT_RECEIVED, user=user_info, message=message)
+            
+    def _handle_kill_match(self, match: re.Match):
+        """handle kill event matches."""
+        kill_data = match.groupdict()
+        logger.info(f"kill detected: {kill_data['killer']} killed {kill_data['victim']} with {kill_data['weapon']}")
+        self._event_bus.publish(EVENT_PLAYER_KILL, killer=kill_data['killer'], victim=kill_data['victim'], weapon=kill_data['weapon'])
+        
+    def _handle_connect_match(self, match: re.Match):
+        """handle player connect matches."""
+        user = match.group('user')
+        logger.info(f"player connected: {user}")
+        self._event_bus.publish(EVENT_PLAYER_CONNECT, user=user)
+        
+    def _handle_suicide_match(self, match: re.Match):
+        """handle player suicide matches."""
+        user = match.group('user')
+        logger.info(f"player suicide: {user}")
+        self._event_bus.publish(EVENT_PLAYER_SUICIDE, user=user)
+        
+    def _process_username_tags(self, raw_user_name: str) -> tuple[str, List[str]]:
+        """efficiently process username tags with optimized algorithm."""
+        user_name = raw_user_name
+        stripped_tags = []
+        possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "*SPEC*", "[SPEC]", "[DEAD]"]
+        
+        # Pre-sort tags by length (longest first) for better matching
+        possible_tags.sort(key=len, reverse=True)
+        
+        max_iterations = 10  # prevent infinite loops
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            tag_found = False
+            original_name = user_name
+            
+            for tag in possible_tags:
+                if user_name.startswith(tag + " "):
+                    stripped_tags.append(tag)
+                    user_name = user_name[len(tag)+1:].strip()
+                    tag_found = True
+                    break
+                elif user_name.startswith(tag):
+                    stripped_tags.append(tag)
+                    user_name = user_name[len(tag):].strip()
+                    tag_found = True
+                    break
+                    
+            if not tag_found or user_name == original_name:
+                break
+                
+        return user_name, stripped_tags
 
 
     def start_monitoring(self) -> threading.Thread | None:
