@@ -4,10 +4,11 @@ import os
 import tempfile
 import uuid # Import uuid for unique filenames
 import time # Import time for sleep
+import hashlib # For caching
 import yt_dlp # requires yt-dlp package
 from gtts import gTTS, gTTSError # Import gTTS
 from pydub import AudioSegment # Import pydub
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import sounddevice as sd # Import sounddevice for direct playback
 import soundfile as sf   # Import soundfile for reading WAV data
 
@@ -27,109 +28,179 @@ _audio_player_instance: AudioPlayer | None = None
 TEMP_DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "requestify_py_downloads")
 os.makedirs(TEMP_DOWNLOAD_DIR, exist_ok=True)
 
-def _download_audio(url_or_search: str) -> str | None:
-    """downloads audio using yt-dlp and returns the file path."""
-    logger.info(f"attempting to download/extract audio for: {url_or_search}")
+# Download cache to avoid re-downloading the same songs
+_download_cache: Dict[str, str] = {}  # Key: query hash, Value: file path
+_download_semaphore = threading.Semaphore(3)  # Limit concurrent downloads to 3
+_cleanup_timer: Optional[threading.Timer] = None
 
-    # configure yt-dlp options
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s.%(ext)s'), # save as id.ext
-        'noplaylist': True,
-        'default_search': 'ytsearch1', # search youtube and get first result
-        'quiet': True,
-        'no_warnings': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav', # extract to wav for easier playback with soundfile
-            'preferredquality': '192', # standard quality
-        }],
-        'logger': logging.getLogger('yt_dlp'), # integrate yt-dlp logging
-        # 'nocheckcertificate': True, # uncomment if needed
-        # 'geo_bypass': True, # uncomment if needed
-    }
-
-    downloaded_file_path = None
-    final_file_path = None # Path to return
-    info_dict = None # initialize info_dict to prevent unboundlocalerror
+def _cleanup_old_files():
+    """Periodically clean up old temporary files to save disk space."""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # execute the download/extraction
-            info_dict = ydl.extract_info(url_or_search, download=True) # this might raise downloaderror
-
-            # --- Determine the final path (Handles both direct URL and search results) ---
-            entry_info = info_dict # Default to top-level dict for direct URLs
-
-            # If 'entries' exists, it's likely a search result, use the first entry
-            if 'entries' in info_dict and info_dict['entries']:
-                logger.debug("Detected 'entries' key, likely a search result. Using first entry.")
-                entry_info = info_dict['entries'][0]
-            elif info_dict.get('_type') == 'playlist':
-                 logger.warning("yt-dlp returned a playlist type directly, but no 'entries'. This might be unexpected.")
-                 # Attempt to use top-level info anyway, might fail.
-
-            # Now extract path info from the determined dictionary (entry_info)
-            if 'requested_downloads' in entry_info and entry_info['requested_downloads']:
-                 downloaded_file_path = entry_info['requested_downloads'][0]['filepath']
-                 logger.info(f"yt-dlp finished. Extracted audio path: {downloaded_file_path}")
-            elif 'filepath' in entry_info: # Fallback if postprocessor didn't populate requested_downloads
-                 downloaded_file_path = entry_info['filepath']
-                 logger.warning(f"yt-dlp finished, using 'filepath' from entry_info: {downloaded_file_path}. Check if correct format.")
-            else:
-                 # Log detailed info if path extraction fails
-                 logger.error(f"Could not determine downloaded file path from yt-dlp info for: {url_or_search}")
-                 logger.debug(f"Top-level info_dict: {info_dict}")
-                 if entry_info is not info_dict: # Log entry_info only if it's different
-                     logger.debug(f"Used entry_info: {entry_info}")
-                 return None
-
-            # --- Check for expected WAV file after postprocessing ---
-            # Ensure downloaded_file_path is not None before proceeding
-            if downloaded_file_path is None:
-                 logger.error("Internal error: downloaded_file_path became None before WAV check.")
-                 return None
-
-            expected_path = os.path.splitext(downloaded_file_path)[0] + '.wav'
-            if os.path.exists(expected_path):
-                 logger.info(f"Confirmed extracted WAV file exists: {expected_path}")
-                 final_file_path = expected_path
-            elif os.path.exists(downloaded_file_path):
-                 logger.warning(f"Postprocessing to WAV might have failed. Using original downloaded file: {downloaded_file_path}")
-                 final_file_path = downloaded_file_path # Return original if WAV not found
-            else:
-                 logger.error(f"Neither expected WAV nor original download path found after yt-dlp: {expected_path} / {downloaded_file_path}")
-                 return None
-
-        # --- Add delay after ydl context manager exits ---
-        # Give ffmpeg/postprocessor time to release file locks
-        time.sleep(0.5)
-        logger.debug("Short delay added after yt-dlp processing.")
-        # -------------------------------------------------
-
-        return final_file_path # Return the determined path
-
-    except PermissionError as e:
-        logger.error(f"permissionerror during yt-dlp postprocessing for '{url_or_search}': {e}", exc_info=True)
-        # --- Fix TypeError: Check if info_dict exists before accessing ---
-        if info_dict and 'filepath' in info_dict and os.path.exists(info_dict['filepath']):
-             logger.warning(f"returning original download path due to permissionerror: {info_dict['filepath']}")
-             return info_dict.get('filepath') # use .get() for safety
-        # -----------------------------------------------------------------
-        return None
-    except yt_dlp.utils.DownloadError as e:
-        err_str = str(e)
-        if "warning: unable to obtain file audio codec with ffprobe" in err_str:
-             logger.warning(f"yt-dlp downloaderror contained ffprobe warning for '{url_or_search}': {err_str}")
-             return None
-        elif "unable to rename file" in err_str:
-             logger.error(f"yt-dlp file rename error for '{url_or_search}': {err_str}")
-             return None
-        else:
-             logger.error(f"yt-dlp downloaderror for '{url_or_search}': {err_str}")
-             return None
+        if not os.path.exists(TEMP_DOWNLOAD_DIR):
+            return
+        
+        current_time = time.time()
+        max_age_seconds = 3600  # 1 hour
+        files_removed = 0
+        
+        for filename in os.listdir(TEMP_DOWNLOAD_DIR):
+            file_path = os.path.join(TEMP_DOWNLOAD_DIR, filename)
+            try:
+                # Skip if file is in cache (still in use)
+                if file_path in _download_cache.values():
+                    continue
+                
+                # Check file age
+                if os.path.isfile(file_path):
+                    file_age = current_time - os.path.getmtime(file_path)
+                    if file_age > max_age_seconds:
+                        os.remove(file_path)
+                        files_removed += 1
+                        logger.debug(f"Cleaned up old temp file: {filename}")
+            except Exception as e:
+                logger.error(f"Error cleaning up file {filename}: {e}")
+        
+        if files_removed > 0:
+            logger.info(f"Periodic cleanup: removed {files_removed} old temporary files")
     except Exception as e:
-        logger.error(f"unexpected error during yt-dlp processing for '{url_or_search}': {e}", exc_info=True)
-        return None
+        logger.error(f"Error during periodic cleanup: {e}", exc_info=True)
+    finally:
+        # Schedule next cleanup in 10 minutes
+        global _cleanup_timer
+        _cleanup_timer = threading.Timer(600, _cleanup_old_files)
+        _cleanup_timer.daemon = True
+        _cleanup_timer.start()
+
+def start_periodic_cleanup():
+    """Start the periodic cleanup timer."""
+    global _cleanup_timer
+    if _cleanup_timer is None or not _cleanup_timer.is_alive():
+        _cleanup_timer = threading.Timer(600, _cleanup_old_files)
+        _cleanup_timer.daemon = True
+        _cleanup_timer.start()
+        logger.info("Started periodic cleanup timer (runs every 10 minutes)")
+
+def stop_periodic_cleanup():
+    """Stop the periodic cleanup timer."""
+    global _cleanup_timer
+    if _cleanup_timer and _cleanup_timer.is_alive():
+        _cleanup_timer.cancel()
+        logger.info("Stopped periodic cleanup timer")
+
+def _download_audio(url_or_search: str) -> str | None:
+    """downloads audio using yt-dlp and returns the file path. Uses caching to avoid re-downloads."""
+    # Check cache first
+    query_hash = hashlib.md5(url_or_search.lower().encode()).hexdigest()
+    if query_hash in _download_cache:
+        cached_path = _download_cache[query_hash]
+        if os.path.exists(cached_path):
+            logger.info(f"Using cached audio file for: {url_or_search}")
+            return cached_path
+        else:
+            # File was deleted, remove from cache
+            del _download_cache[query_hash]
+    
+    logger.info(f"attempting to download/extract audio for: {url_or_search}")
+    
+    # Limit concurrent downloads
+    with _download_semaphore:
+        # configure yt-dlp options
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(TEMP_DOWNLOAD_DIR, '%(id)s.%(ext)s'), # save as id.ext
+            'noplaylist': True,
+            'default_search': 'ytsearch1', # search youtube and get first result
+            'quiet': True,
+            'no_warnings': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav', # extract to wav for easier playback with soundfile
+                'preferredquality': '192', # standard quality
+            }],
+            'logger': logging.getLogger('yt_dlp'), # integrate yt-dlp logging
+            # 'nocheckcertificate': True, # uncomment if needed
+            # 'geo_bypass': True, # uncomment if needed
+        }
+
+        downloaded_file_path = None
+        final_file_path = None # Path to return
+        info_dict = None # initialize info_dict to prevent unboundlocalerror
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # execute the download/extraction
+                info_dict = ydl.extract_info(url_or_search, download=True) # this might raise downloaderror
+
+                # --- Determine the final path (Handles both direct URL and search results) ---
+                entry_info = info_dict # Default to top-level dict for direct URLs
+
+                # If 'entries' exists, it's likely a search result, use the first entry
+                if 'entries' in info_dict and info_dict['entries']:
+                    logger.debug("Detected 'entries' key, likely a search result. Using first entry.")
+                    entry_info = info_dict['entries'][0]
+                elif info_dict.get('_type') == 'playlist':
+                     logger.warning("yt-dlp returned a playlist type directly, but no 'entries'. This might be unexpected.")
+                     # Attempt to use top-level info anyway, might fail.
+
+                # Now extract path info from the determined dictionary (entry_info)
+                if 'requested_downloads' in entry_info and entry_info['requested_downloads']:
+                     downloaded_file_path = entry_info['requested_downloads'][0]['filepath']
+                     logger.info(f"yt-dlp finished. Extracted audio path: {downloaded_file_path}")
+                elif 'filepath' in entry_info: # Fallback if postprocessor didn't populate requested_downloads
+                     downloaded_file_path = entry_info['filepath']
+                     logger.warning(f"yt-dlp finished, using 'filepath' from entry_info: {downloaded_file_path}. Check if correct format.")
+                else:
+                     # Log detailed info if path extraction fails
+                     logger.error(f"Could not determine downloaded file path from yt-dlp info for: {url_or_search}")
+                     logger.debug(f"Top-level info_dict: {info_dict}")
+                     if entry_info is not info_dict: # Log entry_info only if it's different
+                         logger.debug(f"Used entry_info: {entry_info}")
+                     return None
+
+                # --- Check for expected WAV file after postprocessing ---
+                # Ensure downloaded_file_path is not None before proceeding
+                if downloaded_file_path is None:
+                     logger.error("Internal error: downloaded_file_path became None before WAV check.")
+                     return None
+
+                expected_path = os.path.splitext(downloaded_file_path)[0] + '.wav'
+                if os.path.exists(expected_path):
+                     logger.info(f"Confirmed extracted WAV file exists: {expected_path}")
+                     final_file_path = expected_path
+                elif os.path.exists(downloaded_file_path):
+                     final_file_path = downloaded_file_path # Return original if WAV not found
+                else:
+                     logger.error(f"Neither expected WAV nor original download path found after yt-dlp: {expected_path} / {downloaded_file_path}")
+                     return None
+
+            # Cache the successful download
+            if final_file_path:
+                _download_cache[query_hash] = final_file_path
+                logger.debug(f"Cached download for query hash: {query_hash}")
+            
+            return final_file_path # Return the determined path
+
+        except PermissionError as e:
+            logger.error(f"permissionerror during yt-dlp postprocessing for '{url_or_search}': {e}", exc_info=True)
+            # --- Fix TypeError: Check if info_dict exists before accessing ---
+            if info_dict and 'filepath' in info_dict and os.path.exists(info_dict['filepath']):
+                 logger.warning(f"returning original download path due to permissionerror: {info_dict['filepath']}")
+                 return info_dict.get('filepath') # use .get() for safety
+            # -----------------------------------------------------------------
+            return None
+        except yt_dlp.utils.DownloadError as e:
+            err_str = str(e)
+            if "warning: unable to obtain file audio codec with ffprobe" in err_str:
+                 logger.warning(f"yt-dlp downloaderror contained ffprobe warning for '{url_or_search}': {err_str}")
+                 return None
+            elif "unable to rename file" in err_str:
+                 logger.error(f"yt-dlp file rename error for '{url_or_search}': {err_str}")
+                 return None
+            else:
+                 logger.error(f"yt-dlp downloaderror for '{url_or_search}': {err_str}")
+                 return None
+        except Exception as e:
+            logger.error(f"unexpected error during yt-dlp processing for '{url_or_search}': {e}", exc_info=True)
+            return None
 
 
 def cmd_play(user: Dict[str, Any], args: List[str]):
@@ -151,8 +222,6 @@ def cmd_play(user: Dict[str, Any], args: List[str]):
         try:
             file_path = _download_audio(query)
             if file_path:
-                # Add small delay before queueing
-                time.sleep(0.2)
                 if os.path.exists(file_path):
                     logger.info(f"Queueing downloaded file: {file_path}")
                     # Extract title from query for better user experience
@@ -382,10 +451,17 @@ def register(command_manager: CommandManager, audio_player: AudioPlayer):
         source="core"
     )
     # register other core commands here if needed
+    
+    # Start periodic cleanup of old temp files
+    start_periodic_cleanup()
+    
     logger.info("core commands registered.")
-
+    
 def unregister(command_manager: CommandManager):
      """unregisters core commands."""
+     # Stop periodic cleanup timer
+     stop_periodic_cleanup()
+     
      # example - implement if needed for dynamic reloading
      command_manager.unregister_command("play")
      command_manager.unregister_command("stop")

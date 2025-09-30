@@ -148,8 +148,8 @@ class AudioPlayer:
 
                     # event to signal when callback is done or errored
                     stream_finished_event = threading.Event()
-                    # buffer size (frames per callback)
-                    blocksize = 1024 # adjust as needed
+                    # buffer size (frames per callback) - larger buffer reduces CPU overhead
+                    blocksize = 2048 # optimized for better performance
 
                     def callback(outdata: memoryview, frames: int, time_info, status: sd.CallbackFlags):
                         """callback function to feed audio data to the stream."""

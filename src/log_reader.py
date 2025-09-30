@@ -108,9 +108,7 @@ class LogFileEventHandler(FileSystemEventHandler):
                     # log the raw content read before splitting lines
                     logger.debug(f"raw content read:\n---\n{new_content}\n---")
                     lines = new_content.splitlines()
-                    # --- Add small delay to potentially coalesce rapid events ---
-                    time.sleep(0.1)
-                    # -----------------------------------------------------------
+                    # Process lines immediately without artificial delay
                     for i, line in enumerate(lines):
                          if line: # avoid processing empty lines
                             logger.debug(f"processing line {i+1}/{len(lines)}: '{line}'") # log each line being processed
