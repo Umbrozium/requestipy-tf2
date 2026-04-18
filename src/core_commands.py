@@ -288,6 +288,7 @@ def cmd_skip(user: Dict[str, Any], args: List[str]):
 
 # --- !tts command logic ---
 
+
 def cmd_tts(user: Dict[str, Any], args: List[str]):
     """handles the !tts command."""
     global _audio_player_instance
@@ -450,6 +451,7 @@ def register(command_manager: CommandManager, audio_player: AudioPlayer):
         admin_only=False, # Allow all users
         source="core"
     )
+
     # register other core commands here if needed
     
     # Start periodic cleanup of old temp files

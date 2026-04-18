@@ -1,9 +1,11 @@
 {
-  "game_dir": "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf",
+  "game_dir": "D:/games/shite/steamapps/common/Team Fortress 2/tf",
   "log_file_name": "console.log",
-  "admin_user": "pill",
+  "admin_user": "ergo",
   "ignored_users": [],
   "ignored_reversed": false,
   "log_level": "INFO",
-  "output_device_substring": "CABLE Input"
+  "output_device_substring": "Line 1 (Virtual Audio Cable)",
+  "volume": 0.25,
+  "team": "yes"
 }

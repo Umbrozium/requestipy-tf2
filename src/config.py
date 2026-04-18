@@ -39,13 +39,27 @@ CONFIG_SCHEMA = {
             "description": "Logging level for the application."
         },
         "output_device_substring": {
-            "type": ["string", "null"], # Allow null or string
+            "type": ["string", "null"], 
             "default": None,
             "description": "Substring to identify the virtual audio output device (e.g., 'CABLE Input'). Null/empty uses default."
+        },
+        # ADD THE VOLUME PROPERTY HERE:
+        "volume": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 2.0,
+            "default": 0.2,
+            "description": "Audio playback volume multiplier (0.0 to 1.0 is standard)."
+        },
+        "team": {
+            "type": "string",
+            "enum": ["yes", "no"],
+            "default": "no",
+            "description": "If 'yes', only parses commands from team chat messages."
         }
     },
     "required": ["game_dir", "admin_user"],
-    "additionalProperties": False # Disallow extra properties not defined in the schema
+    "additionalProperties": False 
 }
 
 # --- Custom Exception ---

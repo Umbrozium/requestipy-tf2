@@ -29,25 +29,29 @@ class CompiledPattern:
     message_type: MessageType
     
 # Pre-compiled regex patterns for better performance
+# Added optional timestamp prefix to the beginning of the expressions
+timestamp_prefix = r"(?:\[?\d{2}/\d{2}/\d{4} - \d{2}:\d{2}:\d{2}\]?:\s)?"
+
 COMPILED_PATTERNS = [
     CompiledPattern(
-        re.compile(r"^(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$"),
+        # Change f"..." to rf"..."
+        re.compile(rf"^{timestamp_prefix}(?:\*?(?:DEAD|TEAM|SPEC)\*? )?(?P<user>.+?)<(?P<steamid>U:\d+:\d+)>(?:<(?P<team>Red|Blue|Spectator|Console)>)? : (?P<message>.+)$"),
         MessageType.CHAT_FULL
     ),
     CompiledPattern(
-        re.compile(r"^(?P<user>[^:]+?) : (?P<message>.+)$"),
+        re.compile(rf"^{timestamp_prefix}(?P<user>[^:]+?) : (?P<message>.+)$"),
         MessageType.CHAT_SIMPLE
     ),
     CompiledPattern(
-        re.compile(r"^(?P<killer>.+?) killed (?P<victim>.+?) with (?P<weapon>.+?)\.(?: \(crit\))?$"),
+        re.compile(rf"^{timestamp_prefix}(?P<killer>.+?) killed (?P<victim>.+?) with (?P<weapon>.+?)\.(?: \(crit\))?$"),
         MessageType.KILL
     ),
     CompiledPattern(
-        re.compile(r"^(?P<user>.+?) connected$"),
+        re.compile(rf"^{timestamp_prefix}(?P<user>.+?) connected$"),
         MessageType.CONNECT
     ),
     CompiledPattern(
-        re.compile(r"^(?P<user>.+?) suicided\.$"),
+        re.compile(rf"^{timestamp_prefix}(?P<user>.+?) suicided\.$"),
         MessageType.SUICIDE
     )
 ]
@@ -77,7 +81,8 @@ class LogFileEventHandler(FileSystemEventHandler):
             # ensure directory exists (though it should if tf2 is running)
             os.makedirs(os.path.dirname(self._file_path), exist_ok=True)
             # open file if it exists, create if not (tf2 might create it)
-            self._file = open(self._file_path, 'a+', encoding='utf-8') # open in append+read mode
+            # FIX: Added errors='replace' to safely handle invalid UTF-8 bytes
+            self._file = open(self._file_path, 'a+', encoding='utf-8', errors='replace') 
             self._file.seek(0, os.SEEK_END) # go to the end
             self._last_size = self._file.tell()
             logger.info(f"opened log file {self._file_path} and seeked to end (position {self._last_size}).")
@@ -102,8 +107,9 @@ class LogFileEventHandler(FileSystemEventHandler):
             elif current_size > self._last_size:
                 # read the new content
                 self._file.seek(self._last_size)
-                new_content = self._file.read(current_size - self._last_size)
-                logger.debug(f"read {len(new_content)} bytes from log file.") # log bytes read
+                # FIX: Read safely to EOF without byte-math
+                new_content = self._file.read() 
+                logger.debug(f"read {len(new_content)} characters from log file.")
                 if new_content:
                     # log the raw content read before splitting lines
                     logger.debug(f"raw content read:\n---\n{new_content}\n---")
@@ -155,6 +161,11 @@ RECENT_LINE_CACHE_SIZE = 10
 
 class LogReader:
     """monitors and parses the tf2 console log file."""
+
+    def _clean_string(self, text: str) -> str:
+        """Removes zero-width characters and unprintable control codes."""
+        # Matches common invisible/formatting characters injected by TF2
+        return re.sub(r'[\x00-\x1F\x7F-\x9F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]', '', text).strip()
 
     def __init__(self, config: Dict, event_bus: EventBus):
         self._config = config
@@ -215,14 +226,19 @@ class LogReader:
             
     def _handle_chat_match(self, match: re.Match, message_type: MessageType):
         """handle chat message matches with optimized user processing."""
-        raw_user_name = (match.group('user') or "").strip()
-        message = (match.group('message') or "").strip()
+        raw_user_name = (match.group('user') or "")
+        message = (match.group('message') or "")
+        
+        # FIX: Clean the strings of invisible characters first
+        raw_user_name = self._clean_string(raw_user_name)
+        message = self._clean_string(message)
         
         if not raw_user_name or not message:
             return
             
         # Extract additional data based on message type
         steamid = match.group('steamid') if message_type == MessageType.CHAT_FULL else None
+        # ... rest of the code remains the same ...
         team = match.group('team') if message_type == MessageType.CHAT_FULL else None
 
         # Process username and tags
@@ -237,9 +253,20 @@ class LogReader:
 
         # Process chat message
         if message.startswith("!") and len(message) > 1:
+
+            # --- NEW TEAM CHAT CHECK ---
+            is_team_only = str(self._config.get("team", "no")).lower() == "yes"
+            # Check if any of the extracted tags contain the word "TEAM"
+            is_team_chat = stripped_tags and any("TEAM" in tag for tag in stripped_tags)
+            
+            if is_team_only and not is_team_chat:
+                logger.debug(f"Ignored command '!{message[1:]}' from {user_name}: 'team' config is 'yes' but message lacks TEAM tag.")
+                return 
+            # ---------------------------
+
             # Command detected
             parts = message.split(maxsplit=1)
-            command = parts[0]
+            command = parts[0][1:] # <--- FIX: Slice off the first character '!'
             args_str = parts[1].strip() if len(parts) > 1 else ""
             args_list = args_str.split()
             logger.info(f"Command detected: user={user_info['name']}, command={command}, args={args_list}")
@@ -271,7 +298,8 @@ class LogReader:
         """efficiently process username tags with optimized algorithm."""
         user_name = raw_user_name
         stripped_tags = []
-        possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "*SPEC*", "[SPEC]", "[DEAD]"]
+        # FIX: Added parentheses variations of the tags
+        possible_tags = ["*DEAD*", "*TEAM*", "[TEAM]", "(TEAM)", "*SPEC*", "[SPEC]", "(SPEC)", "[DEAD]", "(DEAD)"]
         
         # Pre-sort tags by length (longest first) for better matching
         possible_tags.sort(key=len, reverse=True)

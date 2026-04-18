@@ -34,15 +34,28 @@ class AudioItem:
 class AudioPlayer:
     """handles audio playback using sounddevice and soundfile."""
 
-    def __init__(self, config: Dict[str, Any], event_bus=None): # event_bus is optional for now
+    def __init__(self, config: Dict[str, Any], event_bus=None): 
         self._config = config
         self._event_bus = event_bus
+        # ADD THIS LINE to grab the volume (default to 20% if not found)
+        self._volume = float(self._config.get("volume", 0.2)) 
+        
+        self._playback_thread: Optional[threading.Thread] = None
+        # ... the rest of your init variables ...
+
+    def __init__(self, config: Dict[str, Any], event_bus=None): 
+        self._config = config
+        self._event_bus = event_bus
+        
+        # Make sure this exact line is present here:
+        self._volume = float(self._config.get("volume", 0.2)) 
+        
         self._playback_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._play_queue = queue.Queue() # queue to hold AudioItem objects
+        self._play_queue = queue.Queue() 
         self._current_stream: Optional[sd.OutputStream] = None
-        self._lock = threading.RLock() # reentrant lock for nested locking
-        self._target_device_id: Optional[int] = None # store the target device id
+        self._lock = threading.RLock() 
+        self._target_device_id: Optional[int] = None 
         self._state = PlaybackState.STOPPED
         self._current_item: Optional[AudioItem] = None
         self._shutdown_requested = False
@@ -100,16 +113,21 @@ class AudioPlayer:
             # file_path = self._play_queue.get(block=True) # wait forever for an item or none
 
             try:
-                # wait for a file path in the queue (with timeout so we can check stop_event)
-                file_path = self._play_queue.get(timeout=0.5)
+                # Get the AudioItem object from the queue
+                current_item = self._play_queue.get(timeout=0.5)
             except queue.Empty:
-                # no item in queue, just keep waiting.
-                # don't check _stop_event here, skip/stop shouldn't kill the thread.
-                continue # no file to play, loop again
+                continue 
 
-            if file_path is None: # sentinel value for shutdown
+            if current_item is None: # sentinel value for shutdown
                 logger.info("shutdown sentinel (none) received in queue.")
-                break # exit the main while loop
+                break 
+
+            # Extract the actual string path from the dataclass
+            file_path = current_item.file_path
+            
+            # --- Optional but highly recommended: Update your state tracker ---
+            with self._lock:
+                self._current_item = current_item
 
             # --- check stop event again after getting an item ---
             # this handles if stop/skip was called *while* waiting for get()
@@ -168,14 +186,14 @@ class AudioPlayer:
                                 outdata[:] = 0 # fill buffer with silence
                                 raise sd.CallbackStop # signal stream to stop
                             else:
-                                # copy the read data into the output buffer slice
-                                outdata[:frames_read] = read_data
+                                # FIX: Multiply the audio data by your volume setting
+                                outdata[:frames_read] = read_data * self._volume
 
                                 if frames_read < frames: # end of file reached in this read
                                     logger.debug(f"callback: padding end of stream ({frames_read}/{frames} frames).")
                                     # zero out the remaining part of the buffer
                                     outdata[frames_read:] = 0
-                                    raise sd.CallbackStop # signal stream to stop after this buffer
+                                    raise sd.CallbackStop
 
                         except Exception as e:
                             logger.error(f"error within audio callback for {file_path}: {e}", exc_info=True)
@@ -341,6 +359,17 @@ class AudioPlayer:
         """returns the configured output device id (or none if default)."""
         return self._target_device_id
 
+    def get_volume(self) -> float:
+        """returns the current volume multiplier."""
+        with self._lock:
+            return getattr(self, '_volume', 1.0)
+
+    def set_volume(self, volume: float):
+        """updates the playback volume safely."""
+        with self._lock:
+            # Clamp the volume between 0.0 (mute) and 2.0 (200% boost)
+            self._volume = max(0.0, min(volume, 2.0))
+            logger.info(f"AudioPlayer volume dynamically updated to {self._volume}")
 
     def shutdown(self):
         """stops the playback thread and cleans up."""
