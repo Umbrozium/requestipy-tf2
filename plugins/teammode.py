@@ -72,6 +72,7 @@ def register(command_manager, event_bus):
         cmd_team, 
         help_text="Toggles team-only command parsing (e.g., !team yes or !team no)",
         admin_only=True,
+        aliases=["tm"],
         source="plugin_teammode"
     )
 

@@ -75,6 +75,7 @@ def register(command_manager, event_bus):
         cmd_volume, 
         help_text="Sets the volume (e.g., !volume 0.15 or !volume 15)",
         aliases=["vol"],
+        admin_only=True,
         source="plugin_volume"
     )
 
