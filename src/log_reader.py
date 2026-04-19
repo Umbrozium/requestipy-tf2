@@ -253,17 +253,6 @@ class LogReader:
 
         # Process chat message
         if message.startswith("!") and len(message) > 1:
-
-            # --- NEW TEAM CHAT CHECK ---
-            is_team_only = str(self._config.get("team", "no")).lower() == "yes"
-            # Check if any of the extracted tags contain the word "TEAM"
-            is_team_chat = stripped_tags and any("TEAM" in tag for tag in stripped_tags)
-            
-            if is_team_only and not is_team_chat:
-                logger.debug(f"Ignored command '!{message[1:]}' from {user_name}: 'team' config is 'yes' but message lacks TEAM tag.")
-                return 
-            # ---------------------------
-
             # Command detected
             parts = message.split(maxsplit=1)
             command = parts[0][1:] # <--- FIX: Slice off the first character '!'

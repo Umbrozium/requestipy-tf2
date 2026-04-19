@@ -52,7 +52,25 @@ class CommandManager:
     def __init__(self, event_bus: EventBus):
         self._commands: Dict[str, Command] = {} # maps name/alias to command object
         self._event_bus = event_bus # may be used for events like command_registered
+        self._command_filters: List[Callable[[Dict[str, Any], str, List[str]], bool]] = []
         logger.info("CommandManager initialized.")
+
+    def add_command_filter(self, filter_func: Callable[[Dict[str, Any], str, List[str]], bool]):
+        """adds a global filter function that runs before a command is executed.
+        the filter should return True to allow execution, or False to block it."""
+        if filter_func not in self._command_filters:
+            self._command_filters.append(filter_func)
+            logger.debug(f"Command filter {filter_func.__name__} added.")
+
+    def remove_command_filter(self, filter_func: Callable[[Dict[str, Any], str, List[str]], bool]):
+        """removes a global command filter."""
+        if filter_func in self._command_filters:
+            self._command_filters.remove(filter_func)
+            logger.debug(f"Command filter {filter_func.__name__} removed.")
+
+    def get_command_filters(self) -> List[Callable[[Dict[str, Any], str, List[str]], bool]]:
+        """returns the list of active command filters."""
+        return self._command_filters.copy()
 
     def register_command(self, name: str, func: CommandCallable, help_text: str = "", aliases: Optional[List[str]] = None, admin_only: bool = False, source: str = "core") -> bool:
         """registers a new command."""

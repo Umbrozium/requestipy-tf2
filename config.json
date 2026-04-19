@@ -5,7 +5,5 @@
   "ignored_users": [],
   "ignored_reversed": false,
   "log_level": "INFO",
-  "output_device_substring": "Line 1 (Virtual Audio Cable)",
-  "volume": 0.25,
-  "team": "yes"
+  "output_device_substring": "Line 1 (Virtual Audio Cable)"
 }

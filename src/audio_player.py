@@ -37,18 +37,9 @@ class AudioPlayer:
     def __init__(self, config: Dict[str, Any], event_bus=None): 
         self._config = config
         self._event_bus = event_bus
-        # ADD THIS LINE to grab the volume (default to 20% if not found)
-        self._volume = float(self._config.get("volume", 0.2)) 
         
-        self._playback_thread: Optional[threading.Thread] = None
-        # ... the rest of your init variables ...
-
-    def __init__(self, config: Dict[str, Any], event_bus=None): 
-        self._config = config
-        self._event_bus = event_bus
-        
-        # Make sure this exact line is present here:
-        self._volume = float(self._config.get("volume", 0.2)) 
+        # Default volume until set by a plugin or command
+        self._volume = 0.2
         
         self._playback_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()

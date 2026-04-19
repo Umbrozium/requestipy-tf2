@@ -91,6 +91,16 @@ class Executor:
         cmd_obj: Command | None = self._command_manager.get_command(command_name)
 
         if cmd_obj:
+            # --- Global Command Filters ---
+            for filter_func in self._command_manager.get_command_filters():
+                try:
+                    if not filter_func(user, command_name, args):
+                        logger.debug(f"Command '!{command_name}' from '{user_name}' blocked by filter {filter_func.__name__}.")
+                        return
+                except Exception as e:
+                    logger.error(f"Error in command filter {filter_func.__name__}: {e}", exc_info=True)
+            # ------------------------------
+
             # --- admin check ---
             # is_admin check already performed above for rate limiting
             logger.debug(f"Admin check for command execution: is_admin={is_admin}")

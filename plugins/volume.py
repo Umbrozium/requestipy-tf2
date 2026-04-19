@@ -1,8 +1,37 @@
 import logging
-from src.config import load_config, save_config
+import json
+import os
 import src.core_commands
 
 logger = logging.getLogger(__name__)
+
+PLUGIN_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'plugin_config.json'))
+
+def load_volume() -> float:
+    if os.path.exists(PLUGIN_CONFIG_PATH):
+        try:
+            with open(PLUGIN_CONFIG_PATH, 'r') as f:
+                return float(json.load(f).get('volume', 0.2))
+        except Exception as e:
+            logger.error(f"Failed to load volume config: {e}")
+    return 0.2
+
+def save_volume(vol: float):
+    config = {}
+    if os.path.exists(PLUGIN_CONFIG_PATH):
+        try:
+            with open(PLUGIN_CONFIG_PATH, 'r') as f:
+                config = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read plugin config for updating: {e}")
+            
+    config['volume'] = vol
+    
+    try:
+        with open(PLUGIN_CONFIG_PATH, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save volume config: {e}")
 
 def cmd_volume(user, args):
     """Handles the !volume command to adjust playback level."""
@@ -12,40 +41,33 @@ def cmd_volume(user, args):
         return
 
     if not args:
-        # If they just type !volume, tell them the current volume
         current_vol = audio_player.get_volume()
         logger.info(f"Current volume is {current_vol * 100:.0f}%")
-        # Note: If your framework has a way to send chat messages back to the server, 
-        # you would trigger that here!
         return
 
     try:
-        # Parse the input
         vol_str = args[0]
         vol_val = float(vol_str)
         
-        # User-friendly check: if they type "15", they probably mean 15% (0.15)
-        # If they type "0.15", they also mean 15%
         if vol_val > 2.0: 
             vol_val = vol_val / 100.0
 
-        # Update the live audio player
         audio_player.set_volume(vol_val)
         logger.info(f"User {user['name']} set volume to {vol_val * 100:.0f}%")
         
-        # Save the new volume to config.json so it persists after restarts!
-        try:
-            config = load_config()
-            config['volume'] = audio_player.get_volume()
-            save_config(config)
-            logger.info("New volume saved to config.json successfully.")
-        except Exception as e:
-            logger.error(f"Failed to save volume to config: {e}")
-
+        save_volume(audio_player.get_volume())
+        logger.info("New volume saved to plugin_config.json successfully.")
     except ValueError:
         logger.warning(f"Invalid volume argument provided by {user['name']}: {args[0]}")
 
 def register(command_manager, event_bus):
+    # Set the initial volume on startup
+    audio_player = src.core_commands._audio_player_instance
+    if audio_player:
+        initial_vol = load_volume()
+        audio_player.set_volume(initial_vol)
+        logger.info(f"Plugin 'volume' initialized audio player volume to {initial_vol * 100:.0f}%")
+
     command_manager.register_command(
         "volume", 
         cmd_volume, 
