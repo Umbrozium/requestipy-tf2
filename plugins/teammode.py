@@ -2,6 +2,8 @@ import logging
 import json
 import os
 
+__version__ = "1.0"
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'plugin_config.json'))
