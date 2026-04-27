@@ -186,6 +186,9 @@ class AudioPlayer:
                                     outdata[frames_read:] = 0
                                     raise sd.CallbackStop
 
+                        except (sd.CallbackStop, sd.CallbackAbort):
+                            # Re-raise to let sounddevice handle the intended stop/abort
+                            raise
                         except Exception as e:
                             logger.error(f"error within audio callback for {file_path}: {e}", exc_info=True)
                             # Signal completion/error to the main thread
